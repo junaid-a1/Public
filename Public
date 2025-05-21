@@ -1,0 +1,323 @@
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:video_player/video_player.dart';
+import 'package:chewie/chewie.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Public',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: LoginPage(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+// ================= Login Page ==================
+
+class LoginPage extends StatefulWidget {
+  @override
+  _LoginPageState createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final emailController = TextEditingController();
+  final passController = TextEditingController();
+  bool isLoading = false;
+
+  void login() async {
+    setState(() => isLoading = true);
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: emailController.text.trim(),
+          password: passController.text.trim());
+      Navigator.pushReplacement(
+          context, MaterialPageRoute(builder: (_) => VideoListPage()));
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Login Failed: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  void register() async {
+    setState(() => isLoading = true);
+    try {
+      await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: emailController.text.trim(),
+          password: passController.text.trim());
+      Navigator.pushReplacement(
+          context, MaterialPageRoute(builder: (_) => VideoListPage()));
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Register Failed: $e')));
+    }
+    setState(() => isLoading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login / Register')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+                controller: emailController,
+                decoration: const InputDecoration(labelText: 'Email')),
+            TextField(
+                controller: passController,
+                decoration: const InputDecoration(labelText: 'Password'),
+                obscureText: true),
+            const SizedBox(height: 20),
+            isLoading
+                ? const CircularProgressIndicator()
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton(onPressed: login, child: const Text('Login')),
+                      ElevatedButton(
+                          onPressed: register, child: const Text('Register')),
+                    ],
+                  )
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ================= Video List Page ==================
+
+class VideoListPage extends StatelessWidget {
+  final user = FirebaseAuth.instance.currentUser;
+
+  Future<void> incrementView(String videoId) async {
+    final videoRef =
+        FirebaseFirestore.instance.collection('videos').doc(videoId);
+    await FirebaseFirestore.instance.runTransaction((transaction) async {
+      final snapshot = await transaction.get(videoRef);
+      if (!snapshot.exists) return;
+      final currentViews = snapshot.get('views') ?? 0;
+      transaction.update(videoRef, {'views': currentViews + 1});
+    });
+  }
+
+  Future<void> likeVideo(String videoId, String userId, BuildContext context) async {
+    final likeRef = FirebaseFirestore.instance
+        .collection('videos')
+        .doc(videoId)
+        .collection('likes')
+        .doc(userId);
+    final videoRef = FirebaseFirestore.instance.collection('videos').doc(videoId);
+
+    final likeDoc = await likeRef.get();
+
+    if (!likeDoc.exists) {
+      await likeRef.set({'likedAt': FieldValue.serverTimestamp()});
+      await FirebaseFirestore.instance.runTransaction((transaction) async {
+        final snapshot = await transaction.get(videoRef);
+        if (!snapshot.exists) return;
+        final currentLikes = snapshot.get('likes') ?? 0;
+        transaction.update(videoRef, {'likes': currentLikes + 1});
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('You already liked this video')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Public Videos'),
+        actions: [
+          IconButton(
+              tooltip: 'Withdraw Request',
+              onPressed: () {
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => WithdrawRequestPage()));
+              },
+              icon: const Icon(Icons.request_page)),
+          IconButton(
+              tooltip: 'Admin Panel',
+              onPressed: () {
+                Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => AdminWithdrawRequestsPage()));
+              },
+              icon: const Icon(Icons.admin_panel_settings)),
+          IconButton(
+              tooltip: 'Logout',
+              onPressed: () async {
+                await FirebaseAuth.instance.signOut();
+                Navigator.pushReplacement(
+                    context, MaterialPageRoute(builder: (_) => LoginPage()));
+              },
+              icon: const Icon(Icons.logout)),
+        ],
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('videos')
+            .orderBy('timestamp', descending: true)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+          final videos = snapshot.data!.docs;
+
+          if (videos.isEmpty) {
+            return const Center(child: Text('No videos found.'));
+          }
+
+          return ListView.builder(
+            itemCount: videos.length,
+            itemBuilder: (context, index) {
+              final videoData = videos[index].data()! as Map<String, dynamic>;
+              final videoId = videos[index].id;
+              final videoUrl = videoData['videoUrl'] ?? '';
+              final likes = videoData['likes'] ?? 0;
+              final views = videoData['views'] ?? 0;
+
+              return Card(
+                margin: const EdgeInsets.all(10),
+                child: Column(
+                  children: [
+                    GestureDetector(
+                      onTap: () async {
+                        await incrementView(videoId);
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) =>
+                                    VideoPlayerScreen(videoUrl: videoUrl)));
+                      },
+                      child: Container(
+                        height: 200,
+                        color: Colors.black12,
+                        child: const Center(
+                            child: Icon(Icons.play_circle_outline, size: 64)),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Likes: $likes'),
+                          Text('Views: $views'),
+                          IconButton(
+                            icon: const Icon(Icons.thumb_up),
+                            onPressed: () {
+                              if (user != null) {
+                                likeVideo(videoId, user!.uid, context);
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text('Please login to like videos')));
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ================= Video Player Screen ==================
+
+class VideoPlayerScreen extends StatefulWidget {
+  final String videoUrl;
+  const VideoPlayerScreen({required this.videoUrl, Key? key}) : super(key: key);
+
+  @override
+  _VideoPlayerScreenState createState() => _VideoPlayerScreenState();
+}
+
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
+  late VideoPlayerController _videoPlayerController;
+  ChewieController? _chewieController;
+
+  @override
+  void initState() {
+    super.initState();
+    _videoPlayerController = VideoPlayerController.network(widget.videoUrl);
+    _videoPlayerController.initialize().then((_) {
+      _chewieController = ChewieController(
+        videoPlayerController: _videoPlayerController,
+        autoPlay: false,
+        looping: false,
+      );
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _videoPlayerController.dispose();
+    _chewieController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Video Player')),
+      body: Center(
+        child: _chewieController != null &&
+                _chewieController!.videoPlayerController.value.isInitialized
+            ? Chewie(controller: _chewieController!)
+            : const CircularProgressIndicator(),
+      ),
+    );
+  }
+}
+
+// ================= Withdraw Request Page ==================
+
+class WithdrawRequestPage extends StatefulWidget {
+  @override
+  _WithdrawRequestPageState createState() => _WithdrawRequestPageState();
+}
+
+class _WithdrawRequestPageState extends State<WithdrawRequestPage> {
+  final _formKey = GlobalKey<FormState>();
+  final _amountController = TextEditingController();
+  String _paymentMethod = 'Bkash';
+  final _accountController = TextEditingController();
+  bool _loading = false;
+
+  Future<void> submitWithdrawRequest({
+    required int amount,
+    required String paymentMethod,
+    required String accountNumber,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('User not logged in');
+
+    await FirebaseFirestore.instance.collection('withdraw_requests').add({
+      'userId': user.uid,
+      'amount': amount,
+      'paymentMethod': paymentMethod,
+      'accountNumber': accountNumber,
+      'status': 'pending',
+      'requestedAt': FieldValue
